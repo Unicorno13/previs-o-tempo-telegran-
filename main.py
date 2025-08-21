@@ -1,99 +1,103 @@
-import os
 import requests
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
+import os
 import time
+from datetime import datetime
+from dotenv import load_dotenv
 
-# Carrega variáveis do .env
 load_dotenv()
 
-OWM_API_KEY = os.getenv("OWM_API_KEY")
-LAT = os.getenv("LAT")
-LON = os.getenv("LON")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Variáveis de ambiente
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY")  # sua chave do OpenWeather
 
-# Para controlar envio diário
-ultima_data_diaria = None
-alerta_enviado = False
+# Cidades e coordenadas (ABC Paulista + SP)
+CIDADES = {
+    "São Paulo": {"lat": -23.5505, "lon": -46.6333},
+    "São Bernardo do Campo": {"lat": -23.691, "lon": -46.564},
+    "Diadema": {"lat": -23.681, "lon": -46.620},
+    "Santo André": {"lat": -23.663, "lon": -46.538},
+    "Ribeirão Pires": {"lat": -23.713, "lon": -46.387},
+    "Mauá": {"lat": -23.667, "lon": -46.461},
+}
 
-def send_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
+# Função para enviar mensagem pelo Telegram
+def enviar_telegram(mensagem):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": mensagem, "parse_mode": "HTML"}
     try:
-        r = requests.post(url, data=payload, timeout=15)
-        if r.status_code == 200:
-            print("[INFO] Mensagem enviada com sucesso!")
-        else:
-            print(f"[ERRO] Falha ao enviar mensagem. Status code: {r.status_code}")
-            print(r.text)
+        requests.post(url, data=payload)
     except Exception as e:
-        print(f"[ERRO] Não foi possível enviar a mensagem: {e}")
+        print(f"[ERRO] Falha ao enviar mensagem: {e}")
 
-def get_weather():
-    url = f"http://api.openweathermap.org/data/2.5/forecast?lat={LAT}&lon={LON}&appid={OWM_API_KEY}&units=metric&lang=pt_br"
+# Função para pegar previsão do OpenWeather
+def pegar_previsao(lat, lon):
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_KEY}&units=metric&lang=pt_br"
     try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        return r.json()
+        r = requests.get(url, timeout=10)
+        dados = r.json()
+        temp = dados["main"]["temp"]
+        temp_min = dados["main"]["temp_min"]
+        temp_max = dados["main"]["temp_max"]
+        umidade = dados["main"]["humidity"]
+        clima = dados["weather"][0]["description"].capitalize()
+        vento = dados["wind"]["speed"]
+        chuva = dados.get("rain", {}).get("1h", 0)
+        return {
+            "temp": temp,
+            "temp_min": temp_min,
+            "temp_max": temp_max,
+            "umidade": umidade,
+            "clima": clima,
+            "vento": vento,
+            "chuva": chuva,
+        }
     except Exception as e:
-        print(f"[ERRO] Falha ao pegar a previsão: {e}")
+        print(f"[ERRO] Falha ao obter previsão: {e}")
         return None
 
-def generate_daily_message(data, hoje):
-    previsoes = [p for p in data["list"] if p["dt_txt"].startswith(hoje)]
-    if not previsoes:
-        return None
+# Função para criar alerta
+def criar_alerta(previsao):
+    alertas = []
+    if previsao["temp"] >= 40:
+        alertas.append("🔥 Temperatura muito alta!")
+    if previsao["umidade"] < 30:
+        alertas.append("🌵 Tempo seco! UR < 30%")
+    if previsao["chuva"] >= 10:
+        alertas.append("💧 Possível alagamento! Chuva intensa")
+    if "trovoada" in previsao["clima"].lower():
+        alertas.append("⚡ Possíveis raios!")
+    if previsao["vento"] >= 15:
+        alertas.append("💨 Ventos fortes!")
+    return "\n".join(alertas)
 
-    temp_min = min([p["main"]["temp_min"] for p in previsoes])
-    temp_max = max([p["main"]["temp_max"] for p in previsoes])
-    chuva_total = sum([p.get("rain", {}).get("3h", 0) for p in previsoes])
-    chance_chuva = "Alta" if chuva_total > 10 else "Média" if chuva_total > 3 else "Baixa"
-
-    mensagem = f"🌤️ Previsão diária ({hoje}):\n"
-    mensagem += f"🌡️ Temperatura: {temp_min:.1f}°C a {temp_max:.1f}°C\n"
-    mensagem += f"🌧️ Chance de chuva: {chance_chuva}\n"
-
-    return mensagem
-
-def check_alert(data, hoje):
-    previsoes = [p for p in data["list"] if p["dt_txt"].startswith(hoje)]
-    if not previsoes:
-        return None
-
-    chuva_total = sum([p.get("rain", {}).get("3h", 0) for p in previsoes])
-    if chuva_total > 20:
-        return "🚨 Alerta: Possibilidade de chuva forte e risco de alagamentos!"
-    return None
-
-def main_loop():
-    global ultima_data_diaria, alerta_enviado
+# Função principal
+def main():
+    ult_temps = {cidade: None for cidade in CIDADES}
     while True:
-        agora = datetime.now()
-        hoje = agora.strftime("%Y-%m-%d")
-        data = get_weather()
-        if not data:
-            time.sleep(300)
-            continue
+        for cidade, coord in CIDADES.items():
+            previsao = pegar_previsao(coord["lat"], coord["lon"])
+            if previsao:
+                # Verifica mudança grande de temperatura
+                ultima_temp = ult_temps[cidade]
+                if ultima_temp is None or abs(previsao["temp"] - ultima_temp) >= 3:
+                    ult_temps[cidade] = previsao["temp"]
+                    
+                    data = datetime.now().strftime("%d/%m/%Y %H:%M")
+                    mensagem = f"🌤️ <b>Previsão do dia - {cidade}</b>\n📅 {data}\n"
+                    mensagem += f"🌡️ Temperatura: {previsao['temp_min']}°C - {previsao['temp_max']}°C (Atual: {previsao['temp']}°C)\n"
+                    mensagem += f"💧 Umidade relativa do ar: {previsao['umidade']}%\n"
+                    mensagem += f"🌥️ Condição do céu: {previsao['clima']}\n"
+                    mensagem += f"💨 Vento: {previsao['vento']} m/s\n"
+                    mensagem += f"🌧️ Chuva na última hora: {previsao['chuva']} mm\n"
 
-        # Mensagem diária
-        if ultima_data_diaria != hoje:
-            diaria = generate_daily_message(data, hoje)
-            if diaria:
-                send_message(diaria)
-                ultima_data_diaria = hoje
+                    alertas = criar_alerta(previsao)
+                    if alertas:
+                        mensagem += f"\n⚠️ <b>Alertas:</b>\n{alertas}"
 
-        # Alerta de chuva forte
-        alerta = check_alert(data, hoje)
-        if alerta and not alerta_enviado:
-            send_message(alerta)
-            alerta_enviado = True
-        elif not alerta:
-            alerta_enviado = False  # reset se não houver mais risco
-
-        # Espera 5 minutos antes de checar novamente
-        time.sleep(300)
+                    enviar_telegram(mensagem)
+        print("[INFO] Previsão enviada. Aguardando próxima atualização...")
+        time.sleep(90 * 60)  # aguarda 90 minutos
 
 if __name__ == "__main__":
-    print("[INFO] Iniciando script inteligente...")
-    main_loop()
+    main()
